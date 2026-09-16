@@ -1,7 +1,8 @@
 import os
 import logging
 import threading
-import requests
+import json
+import urllib.request
 from flask import Flask
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -27,13 +28,18 @@ def home():
 def run_flask():
     app_flask.run(host='0.0.0.0', port=PORT)
 
-# External API helper for TikTok to prevent Render IP bans
+# External API helper for TikTok using standard Python library (urllib)
 def fetch_tiktok_data(url):
     try:
         api_url = f"https://api.tiklydown.eu.org/api/download?url={url}"
-        response = requests.get(api_url, timeout=10)
-        if response.status_code == 200:
-            return response.json()
+        req = urllib.request.Request(
+            api_url, 
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                data = response.read().decode('utf-8')
+                return json.loads(data)
     except Exception as e:
         logging.error(f"TikTok API Exception: {e}")
     return None
@@ -123,7 +129,7 @@ def main():
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
 
-    # Start Flask Web Server in a background thread to keep Render alive
+    # Start Flask Web Server in a background thread
     threading.Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
