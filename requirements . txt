@@ -2,3 +2,6 @@ python-telegram-bot>=20.0
 yt-dlp
 flask
 gunicorn
+python-telegram-bot
+yt-dlp
+requests
