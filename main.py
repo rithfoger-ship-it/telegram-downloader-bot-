@@ -1,9 +1,9 @@
 import os
 import logging
-import threading
+import asyncio
 import json
 import urllib.request
-from flask import Flask
+from aiohttp import web
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
@@ -18,17 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 8080))
 user_set = set()
 
-# Dummy Flask app to satisfy Render's Web Service port requirements
-app_flask = Flask(__name__)
-
-@app_flask.route('/')
-def home():
-    return "FOGER Bot is live and running!"
-
-def run_flask():
-    app_flask.run(host='0.0.0.0', port=PORT)
-
-# External API helper for TikTok using standard Python library (urllib)
+# TikTok API Fetcher
 def fetch_tiktok_data(url):
     try:
         api_url = f"https://api.tiklydown.eu.org/api/download?url={url}"
@@ -62,10 +52,9 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     status_msg = await update.message.reply_text("🔄 Processing your link... Please wait!")
 
-    # 1. Dedicated TikTok Logic (Photo Slideshows & Videos)
+    # 1. Dedicated TikTok Logic
     if "tiktok.com" in url or "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         data = fetch_tiktok_data(url)
-        
         if data:
             images = data.get("images", [])
             if images:
@@ -125,20 +114,35 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error processing URL {url}: {e}")
         await status_msg.edit_text("❌ Failed to download media. Please check if the link is public or valid.")
 
-def main():
+# Web Server Route for Render Health Check
+async def handle_ping(request):
+    return web.Response(text="Bot status: ONLINE")
+
+async def main():
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
 
-    # Start Flask Web Server in a background thread
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Build Telegram Bot App
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_media))
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_media))
+    # Build Web Server for Render
+    web_app = web.Application()
+    web_app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logging.info(f"Web server started on port {PORT}")
 
-    print("Bot service initialized...")
-    app.run_polling()
+    # Start Bot Polling
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling()
+
+    # Keep running forever
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
