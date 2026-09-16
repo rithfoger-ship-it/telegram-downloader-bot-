@@ -24,15 +24,21 @@ def fetch_tiktok_data(url):
         api_url = f"https://api.tiklydown.eu.org/api/download?url={url}"
         req = urllib.request.Request(
             api_url, 
-            headers={'User-Agent': 'Mozilla/5.0'}
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         )
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=8) as response:
             if response.status == 200:
                 data = response.read().decode('utf-8')
                 return json.loads(data)
     except Exception as e:
         logging.error(f"TikTok API Exception: {e}")
     return None
+
+# Async wrapper for yt-dlp to prevent freezing the server
+def run_yt_dlp(ydl_opts, url):
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return info, ydl.prepare_filename(info)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -53,8 +59,8 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🔄 Processing your link... Please wait!")
 
     # 1. Dedicated TikTok Logic
-    if "tiktok.com" in url or "vm.tiktok.com" in url or "vt.tiktok.com" in url:
-        data = fetch_tiktok_data(url)
+    if any(domain in url for domain in ["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]):
+        data = await asyncio.to_thread(fetch_tiktok_data, url)
         if data:
             images = data.get("images", [])
             if images:
@@ -79,42 +85,43 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.delete()
                 return
 
-    # 2. General Downloader (YouTube, Facebook, Instagram)
+    # 2. General Downloader (Fallback for TikTok, YouTube, FB, IG)
     ydl_opts = {
         'format': 'bestvideo[filesize<45M]+bestaudio/best[filesize<45M]/best',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
+        # Run yt-dlp in a separate thread so it won't block the async loop
+        loop = asyncio.get_running_loop()
+        info, file_path = await loop.run_in_executor(None, run_yt_dlp, ydl_opts, url)
 
-            if os.path.exists(file_path):
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                
-                if file_size_mb > 49.5:
-                    await status_msg.edit_text("⚠️ Video size exceeds Telegram's 50MB limit.")
-                    os.remove(file_path)
-                    return
-
-                await status_msg.edit_text("📤 Uploading video...")
-                with open(file_path, 'rb') as video_file:
-                    await update.message.reply_video(
-                        video=video_file,
-                        caption="Downloaded via @FOGER_downloader_bot"
-                    )
-                
+        if os.path.exists(file_path):
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            if file_size_mb > 49.5:
+                await status_msg.edit_text("⚠️ Video size exceeds Telegram's 50MB limit.")
                 os.remove(file_path)
-                await status_msg.delete()
+                return
+
+            await status_msg.edit_text("📤 Uploading video...")
+            with open(file_path, 'rb') as video_file:
+                await update.message.reply_video(
+                    video=video_file,
+                    caption="Downloaded via @FOGER_downloader_bot"
+                )
+            
+            os.remove(file_path)
+            await status_msg.delete()
 
     except Exception as e:
         logging.error(f"Error processing URL {url}: {e}")
         await status_msg.edit_text("❌ Failed to download media. Please check if the link is public or valid.")
 
-# Web Server Route for Render Health Check
+# Web Server Route for Render / UptimeRobot Health Check
 async def handle_ping(request):
     return web.Response(text="Bot status: ONLINE")
 
@@ -127,7 +134,7 @@ async def main():
     tg_app.add_handler(CommandHandler("start", start))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_media))
 
-    # Build Web Server for Render
+    # Build Web Server for Render & UptimeRobot
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     runner = web.AppRunner(web_app)
