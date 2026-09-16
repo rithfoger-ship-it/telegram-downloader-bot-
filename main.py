@@ -1,6 +1,8 @@
 import os
 import logging
+import threading
 import requests
+from flask import Flask
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
@@ -12,18 +14,18 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.environ.get("PORT", 8080))
 user_set = set()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_set.add(user_id)
-    
-    welcome_text = (
-        f"🤖 **FOGER Downloader Bot**\n"
-        f"👥 *Active Users:* `{len(user_set)} users`\n\n"
-        f"Send me any video or photo link from TikTok, Facebook, Instagram, or YouTube!"
-    )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+# Dummy Flask app to satisfy Render's Web Service port requirements
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "FOGER Bot is live and running!"
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=PORT)
 
 # External API helper for TikTok to prevent Render IP bans
 def fetch_tiktok_data(url):
@@ -35,6 +37,17 @@ def fetch_tiktok_data(url):
     except Exception as e:
         logging.error(f"TikTok API Exception: {e}")
     return None
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_set.add(user_id)
+    
+    welcome_text = (
+        f"🤖 **FOGER Downloader Bot**\n"
+        f"👥 *Active Users:* `{len(user_set)} users`\n\n"
+        f"Send me any video or photo link from TikTok, Facebook, Instagram, or YouTube!"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
@@ -48,7 +61,6 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = fetch_tiktok_data(url)
         
         if data:
-            # Handle Photo Slideshows
             images = data.get("images", [])
             if images:
                 await status_msg.edit_text("📸 Downloading photo album...")
@@ -62,7 +74,6 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.delete()
                 return
 
-            # Handle Video
             video_url = data.get("video", {}).get("noWatermark") or data.get("video", {}).get("watermark")
             if video_url:
                 await status_msg.edit_text("📤 Uploading video...")
@@ -89,7 +100,6 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if os.path.exists(file_path):
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 
-                # Telegram 50MB strict limit check
                 if file_size_mb > 49.5:
                     await status_msg.edit_text("⚠️ Video size exceeds Telegram's 50MB limit.")
                     os.remove(file_path)
@@ -112,6 +122,9 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
+
+    # Start Flask Web Server in a background thread to keep Render alive
+    threading.Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
     
